@@ -181,15 +181,6 @@ class ControlBurnClassifier:
             masked = np.ma.masked_array(pred_matrix,ind_matrix)
             OOB_pred_list = masked.mean(axis = 0).data[indicators.sum(axis = 1) > 0]
 
-                if len(OOB_tree_list) > 0:
-                    OOB_pred = []
-                    for tree_temp in OOB_tree_list:
-                        OOB_pred.append(tree_temp.predict(row)[0])
-                    OOB_pred_list.append(np.mean(OOB_pred))
-                else:
-                    y2 = y2.drop(i)
-                    current_pred = current_pred.drop(i)
-
             next_pred = np.array(current_pred) + np.array(OOB_pred_list)
             current_prob =  np.exp(current_pred)/(1+np.exp(current_pred))
             next_prob =  np.exp(next_pred)/(1+np.exp(next_pred))
@@ -362,11 +353,11 @@ class ControlBurnClassifier:
         self.optimization_form = optimization_form
         self.solver = solver
         self.polish_method = polish_method
+
         if  build_forest_method == 'bagboost':
             self.build_forest_method = self.bagboost_forest
         elif build_forest_method == 'bag':
             self.build_forest_method = self.bag_forest
-
         elif build_forest_method == 'doublebagboost':
             self.build_forest_method = self.double_bagboost_forest
 
@@ -775,7 +766,7 @@ class ControlBurnRegressor:
     optimization_form= 'penalized'
 
     #initializer
-    ddef __init__(self,alpha = 0.1,max_depth = 10, optimization_form= 'penalized',solver = 'ECOS_BB',build_forest_method = 'bagboost',
+    def __init__(self,alpha = 0.1,max_depth = 10, optimization_form= 'penalized',solver = 'ECOS_BB',build_forest_method = 'bagboost',
     polish_method = RandomForestRegressor):
         """
         Initalizes a ControlBurnClassifier object. Arguments: {alpha: regularization parameter, max_depth: optional
