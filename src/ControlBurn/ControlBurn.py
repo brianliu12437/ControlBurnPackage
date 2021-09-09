@@ -174,11 +174,12 @@ class ControlBurnClassifier:
             OOB_pred_list = []
             y2 = y.copy()
 
-            for i,row in X.iterrows():
-                row = row.to_frame().transpose()
-                temp_series = indicators.iloc[i]
-                OOB_trees = list(temp_series[temp_series].index.values)
-                OOB_tree_list = list(np.array(tree_list1)[OOB_trees])
+            y2 = y2[indicators.sum(axis = 1) > 0]
+            current_pred = current_pred[indicators.sum(axis = 1) > 0]
+            pred_matrix = np.array([tree_temp.predict(X) for tree_temp in tree_list1])
+            ind_matrix = np.array(~indicators.values).transpose()
+            masked = np.ma.masked_array(pred_matrix,ind_matrix)
+            OOB_pred_list = masked.mean(axis = 0).data[indicators.sum(axis = 1) > 0]
 
                 if len(OOB_tree_list) > 0:
                     OOB_pred = []
@@ -204,6 +205,129 @@ class ControlBurnClassifier:
         self.forest = tree_list
         return
 
+    def double_bagboost_forest(self,X,y):
+        """ double bag-boosting forest growing algorithm, no hyperparameters needed. The number of
+        trees to grow at each boosting iteration is determined by the convergence of
+        the training error. Out-of-bag error is used to determine how many boosting iterations to
+        conduct.
+        """
+        start = time.perf_counter()
+        threshold = self.threshold
+        tail = self.tail
+        self.X = X
+        self.y = y
+        y = pd.Series(y)
+        X = X.reset_index().drop('index',axis = 1)
+        y.index = X.index
+
+        #initialization
+        log_odds = np.log(sum(y)/(len(y)- sum(y)))
+        prob = np.exp(log_odds)/(1+np.exp(log_odds))
+        residual = y - prob
+
+        train = X.copy()
+        train['y'] = list(residual)
+        features = X.columns
+        pred_train = np.zeros(len(residual))
+
+        tree_list = []
+        OOB_error_list = []
+        OOB_converged = False
+
+        depth = 1
+        current_err = None
+        depth_check = False
+        depth_err = 99999
+        depth_converged = False
+
+        while depth_converged == False:
+
+            early_stop_pred = []
+            early_stop_train_err = []
+            converged = False
+            OOB_matrix = []
+            tree_list1 = []
+
+            if len(tree_list) > 0:
+                current_pred = self.__log_odds_predict(X,log_odds,tree_list)
+                X['current_pred'] = current_pred
+                current_pred = X['current_pred']
+                X.drop('current_pred',axis = 1,inplace = True)
+
+            else:
+                X['current_pred'] = log_odds
+                current_pred = X['current_pred']
+                X.drop('current_pred',axis = 1,inplace = True)
+
+            index = 0
+            while converged == False:
+                train1 = train.sample(n = len(train), replace = True)
+                OOB = train[~train.index.isin(train1.drop_duplicates().index.values)].index.values
+                OOB_row = np.repeat(False,len(X))
+                OOB_row[OOB] = True
+                OOB_matrix.append(OOB_row)
+                y1 = train1['y']
+                X1 = train1[features]
+                tree = DecisionTreeRegressor(max_depth = depth)
+                tree.fit(X1,y1)
+                tree_list.append(tree)
+                index = index + 1
+                tree_list1.append(tree)
+                pred = tree.predict(X[features])
+                early_stop_pred.append(pred)
+                temp_pred = current_pred + (np.mean(early_stop_pred,axis = 0))
+                temp_prob = np.exp(temp_pred)/(1+np.exp(temp_pred))
+                early_stop_train_err.append(sklearn.metrics.roc_auc_score(y,temp_prob))
+                converged = self.__converge_test(early_stop_train_err,threshold,tail)
+                pred_train = pred_train + np.mean(early_stop_pred,axis = 0)
+                if converged == False:
+                    pred_train = pred_train - np.mean(early_stop_pred,axis = 0)
+
+            indicators = pd.DataFrame(OOB_matrix).transpose()
+            OOB_pred_list = []
+            y2 = y.copy()
+
+            y2 = y2[indicators.sum(axis = 1) > 0]
+            current_pred = current_pred[indicators.sum(axis = 1) > 0]
+            pred_matrix = np.array([tree_temp.predict(X) for tree_temp in tree_list1])
+            ind_matrix = np.array(~indicators.values).transpose()
+            masked = np.ma.masked_array(pred_matrix,ind_matrix)
+            OOB_pred_list = masked.mean(axis = 0).data[indicators.sum(axis = 1) > 0]
+
+            next_pred = np.array(current_pred) + np.array(OOB_pred_list)
+            next_prob =  np.exp(next_pred)/(1+np.exp(next_pred))
+
+            if current_err == None:
+                current_prob =  np.exp(current_pred)/(1+np.exp(current_pred))
+                current_err = 1 - sklearn.metrics.roc_auc_score(y2,current_prob)
+
+
+            next_err = 1 - sklearn.metrics.roc_auc_score(y2,next_prob)
+            OOB_error_list.append(current_err-next_err)
+            OOB_converged = self.__check_OOB_convergence(OOB_error_list)
+
+            if depth_check == True:
+                depth_check = False
+                if next_err > depth_err:
+                    depth_converged = True
+
+            if OOB_converged == True:
+                tree_list = tree_list[:-index]
+                index = 0
+                depth = depth + 1
+                depth_err = current_err
+                depth_check = True
+
+            current_err = next_err
+
+            all_pred = self.__log_odds_predict(X,log_odds,tree_list)
+            all_prob = np.exp(all_pred)/(1+np.exp(all_pred))
+            train['y'] = y-all_prob
+
+        self.forest = tree_list
+        return
+
+
     #optional arguments
     max_depth = 10
     build_forest_method = bagboost_forest
@@ -224,8 +348,8 @@ class ControlBurnClassifier:
         if optimization_form not in ['penalized','constrained']:
             raise ValueError("optimization_form must be either 'penalized' or 'constrained ")
 
-        if build_forest_method not in ['bagboost','bag']:
-            raise ValueError("build_forest_method must be either 'bag' or 'bagboost' ")
+        if build_forest_method not in ['bagboost','bag','doublebagboost']:
+            raise ValueError("build_forest_method must be either 'bag', 'bagboost', or 'doublebagboost' ")
 
         if max_depth <= 0:
             raise ValueError("max_depth must be greater than 0")
@@ -242,6 +366,9 @@ class ControlBurnClassifier:
             self.build_forest_method = self.bagboost_forest
         elif build_forest_method == 'bag':
             self.build_forest_method = self.bag_forest
+
+        elif build_forest_method == 'doublebagboost':
+            self.build_forest_method = self.double_bagboost_forest
 
 
     #Optimization Method
@@ -500,21 +627,12 @@ class ControlBurnRegressor:
             OOB_pred_list = []
             y2 = y.copy()
 
-            for i,row in X.iterrows():
-
-                row = row.to_frame().transpose()
-                temp_series = indicators.iloc[i]
-                OOB_trees = list(temp_series[temp_series].index.values)
-                OOB_tree_list = list(np.array(tree_list1)[OOB_trees])
-
-                if len(OOB_tree_list) > 0:
-                    OOB_pred = []
-                    for tree_temp in OOB_tree_list:
-                        OOB_pred.append(tree_temp.predict(row)[0])
-                    OOB_pred_list.append(np.mean(OOB_pred))
-                else:
-                    y2 = y2.drop(i)
-                    current_pred = current_pred.drop(i)
+            y2 = y2[indicators.sum(axis = 1) > 0]
+            current_pred = current_pred[indicators.sum(axis = 1) > 0]
+            pred_matrix = np.array([tree_temp.predict(X) for tree_temp in tree_list1])
+            ind_matrix = np.array(~indicators.values).transpose()
+            masked = np.ma.masked_array(pred_matrix,ind_matrix)
+            OOB_pred_list = masked.mean(axis = 0).data[indicators.sum(axis = 1) > 0]
 
             next_pred = np.array(current_pred) + np.array(OOB_pred_list)
             current_err = sklearn.metrics.mean_squared_error(y2,current_pred)
@@ -531,6 +649,123 @@ class ControlBurnRegressor:
         self.forest = tree_list
         return
 
+    def double_bagboost_forest(self,X,y):
+        """ Double bag-boosting forest growing algorithm, no hyperparameters needed. The number of
+        trees to grow at each boosting iteration is determined by the convergence of
+        the training error. Out-of-bag error is used to determine how many boosting iterations to
+        conduct.
+        """
+        threshold = self.threshold
+        tail = self.tail
+        self.X = X
+        self.y = y
+        y = pd.Series(y)
+        X = X.reset_index().drop('index',axis = 1)
+        y.index = X.index
+        pred_train = np.zeros(len(y))
+
+        train = X.copy()
+        train['y'] = list(y)
+        features = X.columns
+
+        tree_list = []
+        OOB_error_list = []
+        OOB_converged = False
+
+        depth = 1
+        current_err = None
+
+        depth_check = False
+        depth_err = 99999
+        depth_converged = False
+
+        while depth_converged == False:
+
+            early_stop_pred = []
+            early_stop_train_err = []
+            converged = False
+            OOB_matrix = []
+            tree_list1 = []
+
+            if len(tree_list) > 0:
+                current_pred = self.__bag_boost_predict(X,tree_list)
+                X['current_pred'] = current_pred
+                current_pred = X['current_pred']
+                X.drop('current_pred',axis = 1,inplace = True)
+
+            else:
+                X['current_pred'] = np.mean(y)
+                current_pred = X['current_pred']
+                X.drop('current_pred',axis = 1,inplace = True)
+
+            index = 0
+
+            while converged == False:
+
+                train1 = train.sample(n = len(train), replace = True)
+                OOB = train[~train.index.isin(train1.drop_duplicates().index.values)].index.values
+                OOB_row = np.repeat(False,len(X))
+                OOB_row[OOB] = True
+                OOB_matrix.append(OOB_row)
+                y1 = train1['y']
+                X1 = train1[features]
+                tree = DecisionTreeRegressor(max_depth = depth)
+                tree.fit(X1,y1)
+                tree_list.append(tree)
+                index = index + 1
+                tree_list1.append(tree)
+                pred = tree.predict(X[features])
+                early_stop_pred.append(pred)
+                pred_train = pred_train + np.mean(early_stop_pred,axis = 0)
+
+                early_stop_train_err.append(sklearn.metrics.mean_squared_error(y,pred_train))
+                converged = self.__converge_test(early_stop_train_err,threshold,tail)
+
+                if converged == False:
+                    pred_train = pred_train - np.mean(early_stop_pred,axis = 0)
+
+            indicators = pd.DataFrame(OOB_matrix).transpose()
+            OOB_pred_list = []
+            y2 = y.copy()
+
+            y2 = y2[indicators.sum(axis = 1) > 0]
+            current_pred = current_pred[indicators.sum(axis = 1) > 0]
+            pred_matrix = np.array([tree_temp.predict(X) for tree_temp in tree_list1])
+            ind_matrix = np.array(~indicators.values).transpose()
+            masked = np.ma.masked_array(pred_matrix,ind_matrix)
+            OOB_pred_list = masked.mean(axis = 0).data[indicators.sum(axis = 1) > 0]
+
+            next_pred = np.array(current_pred) + np.array(OOB_pred_list)
+
+            if current_err == None:
+                current_err = sklearn.metrics.mean_squared_error(y2,current_pred)
+            next_err = sklearn.metrics.mean_squared_error(y2,next_pred)
+
+
+            OOB_error_list.append(current_err-next_err)
+            OOB_converged = self.__check_OOB_convergence(OOB_error_list)
+
+            if depth_check == True:
+                depth_check = False
+                if next_err > depth_err:
+                    depth_converged = True
+
+            if OOB_converged == True:
+                tree_list = tree_list[:-index]
+                index = 0
+                depth = depth + 1
+                depth_err = current_err
+                depth_check = True
+
+
+            current_err = next_err
+            residuals = -self.__loss_gradient(y, pred_train)
+            train['y'] = residuals.values
+
+        self.forest = tree_list
+        return
+
+
     #optional arguments
     max_depth = 10
     build_forest_method = bagboost_forest
@@ -540,7 +775,7 @@ class ControlBurnRegressor:
     optimization_form= 'penalized'
 
     #initializer
-    def __init__(self,alpha = 0.1,max_depth = 10, optimization_form= 'penalized',solver = 'ECOS_BB',build_forest_method = 'bagboost',
+    ddef __init__(self,alpha = 0.1,max_depth = 10, optimization_form= 'penalized',solver = 'ECOS_BB',build_forest_method = 'bagboost',
     polish_method = RandomForestRegressor):
         """
         Initalizes a ControlBurnClassifier object. Arguments: {alpha: regularization parameter, max_depth: optional
@@ -551,8 +786,8 @@ class ControlBurnRegressor:
         if optimization_form not in ['penalized','constrained']:
             raise ValueError("optimization_form must be either 'penalized' or 'constrained")
 
-        if build_forest_method not in ['bagboost','bag']:
-            raise ValueError("build_forest_method must be either 'bag' or 'bagboost' ")
+        if build_forest_method not in ['bagboost','bag','doublebagboost']:
+            raise ValueError("build_forest_method must be either 'bag', 'bagboost', or 'doublebagboost' ")
 
         if max_depth <= 0:
             raise ValueError("max_depth must be greater than 0")
@@ -569,6 +804,9 @@ class ControlBurnRegressor:
             self.build_forest_method = self.bagboost_forest
         elif build_forest_method == 'bag':
             self.build_forest_method = self.bag_forest
+
+        elif build_forest_method == 'doublebagboost':
+            self.build_forest_method = self.double_bagboost_forest
 
     #Optimization Method
     def solve_lasso(self):
