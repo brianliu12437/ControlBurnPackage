@@ -369,7 +369,7 @@ class ControlBurnClassifier:
         subforest.
         """
         if len(self.forest) == 0:
-            raise Exception("Build forest first with methods bag_forest or bagboost_forest")
+            raise Exception("Build forest first.")
         alpha = self.alpha
         X = self.X
         y = self.y
@@ -806,7 +806,7 @@ class ControlBurnRegressor:
         subforest.
         """
         if len(self.forest) == 0:
-            raise Exception("Build forest first with methods bag_forest or bagboost_forest.")
+            raise Exception("Build forest.")
         alpha = self.alpha
         X = self.X
         y = self.y
