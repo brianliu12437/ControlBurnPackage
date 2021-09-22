@@ -202,7 +202,6 @@ class ControlBurnClassifier:
         the training error. Out-of-bag error is used to determine how many boosting iterations to
         conduct.
         """
-        start = time.perf_counter()
         threshold = self.threshold
         tail = self.tail
         self.X = X
