@@ -378,9 +378,15 @@ class ControlBurnClassifier:
         pred = []
         ind = []
 
-        for tree in tree_list:
-            pred.append(tree.predict(X))
-            ind.append([int(x > 0) for x in tree.feature_importances_])
+        if type(tree_list[0]) == sklearn.tree._classes.DecisionTreeClassifier:
+            for tree in tree_list:
+                pred.append(tree.predict_proba(X)[:,1])
+                ind.append([int(x > 0) for x in tree.feature_importances_])
+
+        else:
+            for tree in tree_list:
+                pred.append(tree.predict(X))
+                ind.append([int(x > 0) for x in tree.feature_importances_])
 
         pred = np.transpose(pred)
         ind = np.transpose(ind)
