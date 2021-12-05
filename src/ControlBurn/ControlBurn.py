@@ -3,6 +3,7 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Lasso
 import numpy as np
 import pandas as pd
 import mosek
@@ -805,6 +806,60 @@ class ControlBurnRegressor:
             self.build_forest_method = self.double_bagboost_forest
 
     #Optimization Method
+        def solve_lasso_cvxpy(self):
+            """ Solves LASSO optimization problem using class attribute alpha as the
+            regularization parameter. Stores the selected features, weights, and
+            subforest. Directly solving via cvxpy.
+            """
+            if len(self.forest) == 0:
+                raise Exception("Build forest.")
+            alpha = self.alpha
+            X = self.X
+            y = self.y
+            y = pd.Series(y)
+            y.index = X.index
+            tree_list = self.forest
+            pred = []
+            ind = []
+
+            for tree in tree_list:
+                pred.append(tree.predict(X))
+                ind.append([int(x > 0) for x in tree.feature_importances_])
+
+            pred = np.transpose(pred)
+            ind = np.transpose(ind)
+            w = cp.Variable(len(tree_list),nonneg=True)
+            constraints = []
+
+            if self.optimization_form == 'penalized':
+                loss = cp.sum_squares(cp.matmul(pred,w)-y)
+                objective = (1/len(y))*loss + alpha*cp.norm(cp.matmul(ind,w),1)
+
+            if self.optimization_form == 'constrained':
+                objective = cp.sum_squares(cp.matmul(pred,w)-y)
+                constraints = [cp.norm(cp.matmul(ind,w),1)<= alpha]
+
+            prob = cp.Problem(cp.Minimize(objective),constraints)
+
+            if self.solver == 'MOSEK':
+                prob.solve(solver = cp.MOSEK,mosek_params = {mosek.dparam.optimizer_max_time: 10000.0} )
+            else:
+                prob.solve(solver = self.solver)
+
+            weights = np.asarray(w.value)
+            weights[np.abs(weights) < self.threshold] = 0
+            self.weights = weights
+            self.subforest = list(np.array(tree_list)[[w_ind != 0 for w_ind in list(weights)]])
+            imp = []
+
+            for i in range(0,len(weights)):
+                imp.append(weights[i]*tree_list[i].feature_importances_)
+            imp1 = np.sum(imp, axis = 0)
+            self.feature_importances_ = imp1
+            self.features_selected_ = list(np.array(X.columns)[[i != 0 for i in imp1]])
+
+            return
+
     def solve_lasso(self):
         """ Solves LASSO optimization problem using class attribute alpha as the
         regularization parameter. Stores the selected features, weights, and
@@ -818,6 +873,7 @@ class ControlBurnRegressor:
         y = pd.Series(y)
         y.index = X.index
         tree_list = self.forest
+
         pred = []
         ind = []
 
@@ -827,27 +883,15 @@ class ControlBurnRegressor:
 
         pred = np.transpose(pred)
         ind = np.transpose(ind)
-        w = cp.Variable(len(tree_list),nonneg=True)
-        constraints = []
 
-        if self.optimization_form == 'penalized':
-            loss = cp.sum_squares(cp.matmul(pred,w)-y)
-            objective = (1/len(y))*loss + alpha*cp.norm(cp.matmul(ind,w),1)
+        ind_vec=np.sum(ind,0)
+        inv_mat = np.linalg.inv(np.diag(ind_vec))
+        transformed_matix=np.matmul(pred,inv_mat)
 
-        if self.optimization_form == 'constrained':
-            objective = cp.sum_squares(cp.matmul(pred,w)-y)
-            constraints = [cp.norm(cp.matmul(ind,w),1)<= alpha]
-
-        prob = cp.Problem(cp.Minimize(objective),constraints)
-
-        if self.solver == 'MOSEK':
-            prob.solve(solver = cp.MOSEK,mosek_params = {mosek.dparam.optimizer_max_time: 10000.0} )
-        else:
-            prob.solve(solver = self.solver)
-
-        weights = np.asarray(w.value)
-        weights[np.abs(weights) < self.threshold] = 0
+        fit = Lasso(alpha = alpha,fit_intercept= False, positive = True).fit(transformed_matix,y)
+        weights = np.matmul(inv_mat,np.transpose(fit.coef_))
         self.weights = weights
+
         self.subforest = list(np.array(tree_list)[[w_ind != 0 for w_ind in list(weights)]])
         imp = []
 
@@ -856,7 +900,6 @@ class ControlBurnRegressor:
         imp1 = np.sum(imp, axis = 0)
         self.feature_importances_ = imp1
         self.features_selected_ = list(np.array(X.columns)[[i != 0 for i in imp1]])
-
         return
 
         #sklearn-api wrapper functions
