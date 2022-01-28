@@ -1,13 +1,19 @@
+import warnings
 import sklearn
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Lasso
+from sklearn.linear_model import lasso_path
+from sklearn.model_selection import KFold
 import numpy as np
 import pandas as pd
 import mosek
 import cvxpy as cp
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
 
 class ControlBurnClassifier:
 
@@ -467,13 +473,14 @@ class ControlBurnRegressor:
     forest = []
     weights = []
     subforest = []
+    alpha_range = []
+    coef_path = []
 
     #Class attributes for parameters to determine convergence.
     threshold = 10**-3
     tail = 5
 
     # Private Helper Methods
-
     def __loss_gradient(self,y, y_hat):
         return -(y-y_hat)
 
@@ -501,7 +508,6 @@ class ControlBurnRegressor:
             return True
         else:
             return False
-
 
     def __bag_boost_predict(self,X,tree_list):
         res = []
@@ -934,3 +940,153 @@ class ControlBurnRegressor:
             return pd.DataFrame()
         else:
             return X[self.features_selected_]
+
+    def solve_lasso_path(self, X,y , n_alphas = 500, kwargs = {}):
+        """ Compute the entire lasso path.
+        """
+        if len(self.forest) == 0:
+            raise Exception("Build forest.")
+        alpha = self.alpha
+        y = pd.Series(y)
+        y.index = X.index
+        tree_list = self.forest
+
+        pred = []
+        ind = []
+
+        for tree in tree_list:
+            pred.append(tree.predict(X))
+            ind.append([int(x > 0) for x in tree.feature_importances_])
+
+        pred = np.transpose(np.array(pred,dtype = object))
+        ind = np.transpose(ind)
+
+        ind_vec=np.sum(ind,0)
+        inv_mat = np.linalg.inv(np.diag(ind_vec))
+        transformed_matix=np.matmul(pred,inv_mat)
+
+        alphas, coef_path, _ = lasso_path(transformed_matix, y,
+                        n_alphas = n_alphas, positive = True, **kwargs)
+        coef_path = np.transpose(coef_path)
+
+        self.alpha_range = alphas
+        self.coef_path = [np.dot(inv_mat,coef) for coef in coef_path]
+        return alphas,self.coef_path
+
+    ## TODO: complete this section
+    def fit_cv(self,X,y, nfolds = 5, n_alphas = 500, verbose = True, kwargs = {}):
+        """ Compute the entire lasso path and select the best parameter using
+            a nfold cross validation. Returns the best regularization parameter,
+            support size, and selected features
+        """
+
+        if ( (round(np.mean(y))!= 0) | (round(np.std(y))!= 1)) :
+            raise Exception("Please scale data before using ControlBurnRegressor.")
+
+        alpha = self.alpha
+        y = pd.Series(y)
+        y.index = X.index
+
+
+        kf = KFold(n_splits=nfolds)
+        acc_all = np.array([])
+        alphas_all = np.array([])
+        feats_all = []
+
+        for train_index, test_index in kf.split(X):
+            xTrain1, xTest1 = X.iloc[train_index], X.iloc[test_index]
+            yTrain1, yTest1 = y.iloc[train_index], y.iloc[test_index]
+            self.build_forest_method(xTrain1,yTrain1)
+            tree_list1 = self.forest
+            pred = []
+            ind = []
+
+            for tree in tree_list1:
+                pred.append(tree.predict(xTrain1))
+                ind.append([int(f > 0) for f in tree.feature_importances_])
+
+            pred = np.transpose(np.array(pred,dtype = object))
+            ind = np.transpose(ind)
+
+            ind_vec=np.sum(ind,0)
+            inv_mat = np.linalg.inv(np.diag(ind_vec))
+            transformed_matix=np.matmul(pred,inv_mat)
+            alphas, coef_path, _ = lasso_path(transformed_matix, yTrain1 ,
+                                        n_alphas = n_alphas, positive = True,**kwargs)
+            coef = np.transpose(coef_path)
+
+            acc = []
+            alpha_list = []
+            feats_list = []
+            for i in range(0,len(coef)):
+                #weights = np.dot(inv_mat,coef[i])
+                weights = coef[i]
+                ind = weights>0
+                selected_ensemble= np.array(tree_list1)[ind]
+                selected_weights = weights[ind]
+                if len(selected_ensemble) > 0:
+                    pred = 0
+                    feats_used = np.array([])
+                    for j in range(len(selected_ensemble)):
+                        pred = pred + selected_ensemble[j].predict(xTest1)*selected_weights[j]
+                        feats_used= np.append(feats_used,
+                                    X.columns[selected_ensemble[j].feature_importances_ >0].values)
+
+                    acc.append(sklearn.metrics.mean_squared_error(yTest1,pred))
+                    alpha_list.append(alphas[i])
+                    feats_all.append(list(set(feats_used)))
+
+            acc_all = np.append(acc_all,acc)
+            alphas_all = np.append(alphas_all,alpha_list)
+
+        results = pd.DataFrame(np.column_stack((alphas_all,acc_all,
+                        [len(x) for x in feats_all])),columns = ['alpha','accuracy','num_feats'])
+
+        results = results.sort_values('alpha',ascending = True)
+        results_agg = results.groupby('num_feats').agg(['mean','std']).reset_index()
+        results_agg = results_agg[results_agg['accuracy']['mean']<1]
+        best_nfeats = results_agg.sort_values(('accuracy','mean'),ascending = True)\
+        .head(1)['num_feats'].values[0]
+
+        best_feats = list(np.array(feats_all)\
+                       [[len(x) == best_nfeats for x in feats_all]])
+
+        best_feats = list(set([tuple(sorted(i)) for i in best_feats]))
+        best_alpha = results.sort_values('accuracy',
+                                        ascending = True)['alpha'].values[0]
+
+        self.X = X
+        self.Y = y
+        self.alpha = best_alpha
+        self.forest = []
+        self.subforest = []
+        self.weights = []
+        self.fit(X,y)
+
+        if verbose == True:
+
+            fig, (ax1,ax2) = plt.subplots(1,2,sharey = True , figsize = (12,5))
+            results_plot = results[results['accuracy']<1]
+            ax1.plot(results_plot['alpha'],results_plot['accuracy'],
+                                                    color = 'blue',alpha = .5)
+            ax1.set_xlabel('Regularization Parameter')
+            ax1.set_ylabel('Validation Error')
+
+            y_red_feats = results_agg.sort_values(('accuracy','mean'),ascending = True)\
+            .head(1)['accuracy']['mean'].values
+
+            results_agg = results.groupby('num_feats').agg(['mean','std']).reset_index()
+            results_agg = results_agg[results_agg['accuracy']['mean']<1]
+
+            ax2.errorbar(results_agg['num_feats'],\
+                         results_agg['accuracy']['mean'],results_agg['accuracy']['std'],
+                         alpha = 0.3, color = 'blue',zorder = 1)
+
+            ax2.scatter(results_agg['num_feats'],results_agg['accuracy']\
+                     ['mean'],color = 'blue')
+            ax2.scatter(best_nfeats,y_red_feats,color = 'red',zorder = 2)
+            ax2.set_xlabel('Number of Features Selected')
+            plt.draw()
+
+
+        return best_alpha, best_nfeats,best_feats
