@@ -10,7 +10,7 @@ Tree ensembles distribute feature importance scores evenly amongst groups of cor
 
 The easiest way to install ControlBurn is through pip.
 ```sh
-!pip install ControlBurn==0.1.1
+!pip install ControlBurn==0.1.2
 ```
 
 

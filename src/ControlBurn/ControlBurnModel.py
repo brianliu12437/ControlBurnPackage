@@ -4,6 +4,7 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import SGDClassifier
 from sklearn.linear_model import Lasso
 from sklearn.linear_model import lasso_path
 from sklearn.model_selection import KFold
@@ -328,14 +329,14 @@ class ControlBurnClassifier:
     #optional arguments
     max_depth = 10
     build_forest_method = bagboost_forest
-    polish_method = RandomForestClassifier
+    polish_method = RandomForestClassifier()
     alpha = 0.1
     solver = 'ECOS_BB'
     optimization_form= 'penalized'
 
     #initializer
     def __init__(self,alpha = 0.1,max_depth = 10, optimization_form= 'penalized',solver = 'ECOS_BB',build_forest_method = 'bagboost',
-    polish_method = RandomForestClassifier):
+    polish_method = RandomForestClassifier(max_features = 'sqrt')):
         """
         Initalizes a ControlBurnClassifier object. Arguments: {alpha: regularization parameter, max_depth: optional
         parameter for incremental depth bagging, optimization_form: either 'penalized' or 'constrained', solver: cvxpy solver
@@ -369,7 +370,54 @@ class ControlBurnClassifier:
 
 
     #Optimization Method
-    def solve_lasso(self):
+
+    def solve_lasso(self): #TODO: Finish
+        if len(self.forest) == 0:
+            raise Exception("Build forest first.")
+        alpha = self.alpha
+        X = self.X
+        y = self.y
+        y = pd.Series(y)
+        y.index = X.index
+        tree_list = self.forest
+        pred = []
+        ind = []
+
+        if type(tree_list[0]) == sklearn.tree._classes.DecisionTreeClassifier:
+            for tree in tree_list:
+                pred.append(tree.predict_proba(X)[:,1])
+                ind.append([int(x > 0) for x in tree.feature_importances_])
+        else:
+            for tree in tree_list:
+                pred.append(tree.predict(X))
+                ind.append([int(x > 0) for x in tree.feature_importances_])
+
+        pred = np.transpose(np.array(pred,dtype = object))
+        ind = np.transpose(ind)
+        ind_vec=np.sum(ind,0)
+        ind_vec = [x for x in ind_vec]
+        inv_mat = np.linalg.inv(np.diag(ind_vec))
+        transformed_matix=np.matmul(pred,inv_mat)
+
+        sgd = SGDClassifier(loss = 'log',penalty = 'l1',
+                    fit_intercept = True, alpha = alpha,
+                    max_iter = 5000)
+
+        sgd.fit(transformed_matix, y)
+        weights = np.dot(inv_mat,sgd.coef_[0])
+        self.weights = weights
+        self.subforest = list(np.array(tree_list)[[w_ind != 0 for w_ind in list(weights)]])
+        imp = []
+
+        for i in range(0,len(weights)):
+            imp.append(weights[i]*tree_list[i].feature_importances_)
+        imp1 = np.sum(imp, axis = 0)
+        self.feature_importances_ = imp1
+        self.features_selected_ = list(np.array(X.columns)[[i != 0 for i in imp1]])
+        return
+
+
+    def solve_lasso_cvxpy(self):
         """ Solves LASSO optimization problem using class attribute alpha as the
         regularization parameter. Stores the selected features, weights, and
         subforest.
@@ -440,7 +488,7 @@ class ControlBurnClassifier:
         if len(self.features_selected_) == 0:
             self.trained_polish = y
         else:
-            self.trained_polish = self.polish_method().fit(X[self.features_selected_],y)
+            self.trained_polish = self.polish_method.fit(X[self.features_selected_],y)
 
     def predict(self,X):
         """ Returns binary predictions of final model trained on selected features.
@@ -772,14 +820,19 @@ class ControlBurnRegressor:
     #optional arguments
     max_depth = 10
     build_forest_method = bagboost_forest
-    polish_method = RandomForestRegressor
+    polish_method = RandomForestRegressor()
     alpha = 0.1
     solver = 'ECOS_BB'
     optimization_form= 'penalized'
 
+    def skip_build_forest(self,X,y):
+        self.X = X
+        self.y = y
+        return
+
     #initializer
     def __init__(self,alpha = 0.1,max_depth = 10, optimization_form= 'penalized',solver = 'ECOS_BB',build_forest_method = 'bagboost',
-    polish_method = RandomForestRegressor):
+    polish_method = RandomForestRegressor(max_features = 'sqrt') , custom_forest = [] ):
         """
         Initalizes a ControlBurnClassifier object. Arguments: {alpha: regularization parameter, max_depth: optional
         parameter for incremental depth bagging, optimization_form: either 'penalized' or 'constrained', solver: cvxpy solver
@@ -789,8 +842,8 @@ class ControlBurnRegressor:
         if optimization_form not in ['penalized','constrained']:
             raise ValueError("optimization_form must be either 'penalized' or 'constrained")
 
-        if build_forest_method not in ['bagboost','bag','doublebagboost']:
-            raise ValueError("build_forest_method must be either 'bag', 'bagboost', or 'doublebagboost' ")
+        if build_forest_method not in ['bagboost','bag','doublebagboost','custom']:
+            raise ValueError("build_forest_method must be either 'bag', 'bagboost', 'doublebagboost', or 'custom' ")
 
         if max_depth <= 0:
             raise ValueError("max_depth must be greater than 0")
@@ -807,69 +860,20 @@ class ControlBurnRegressor:
             self.build_forest_method = self.bagboost_forest
         elif build_forest_method == 'bag':
             self.build_forest_method = self.bag_forest
-
         elif build_forest_method == 'doublebagboost':
             self.build_forest_method = self.double_bagboost_forest
 
+        elif build_forest_method == 'custom':
+            if len(custom_forest) == 0:
+                raise ValueError("Must provide external tree list")
+            self.forest = custom_forest
+            self.build_forest_method = self.skip_build_forest
+
     #Optimization Method
-        def solve_lasso_cvxpy(self):
-            """ Solves LASSO optimization problem using class attribute alpha as the
-            regularization parameter. Stores the selected features, weights, and
-            subforest. Directly solving via cvxpy.
-            """
-            if len(self.forest) == 0:
-                raise Exception("Build forest.")
-            alpha = self.alpha
-            X = self.X
-            y = self.y
-            y = pd.Series(y)
-            y.index = X.index
-            tree_list = self.forest
-            pred = []
-            ind = []
-
-            for tree in tree_list:
-                pred.append(tree.predict(X))
-                ind.append([int(x > 0) for x in tree.feature_importances_])
-
-            pred = np.transpose(pred)
-            ind = np.transpose(ind)
-            w = cp.Variable(len(tree_list),nonneg=True)
-            constraints = []
-
-            if self.optimization_form == 'penalized':
-                loss = cp.sum_squares(cp.matmul(pred,w)-y)
-                objective = (1/len(y))*loss + alpha*cp.norm(cp.matmul(ind,w),1)
-
-            if self.optimization_form == 'constrained':
-                objective = cp.sum_squares(cp.matmul(pred,w)-y)
-                constraints = [cp.norm(cp.matmul(ind,w),1)<= alpha]
-
-            prob = cp.Problem(cp.Minimize(objective),constraints)
-
-            if self.solver == 'MOSEK':
-                prob.solve(solver = cp.MOSEK,mosek_params = {mosek.dparam.optimizer_max_time: 10000.0} )
-            else:
-                prob.solve(solver = self.solver)
-
-            weights = np.asarray(w.value)
-            weights[np.abs(weights) < self.threshold] = 0
-            self.weights = weights
-            self.subforest = list(np.array(tree_list)[[w_ind != 0 for w_ind in list(weights)]])
-            imp = []
-
-            for i in range(0,len(weights)):
-                imp.append(weights[i]*tree_list[i].feature_importances_)
-            imp1 = np.sum(imp, axis = 0)
-            self.feature_importances_ = imp1
-            self.features_selected_ = list(np.array(X.columns)[[i != 0 for i in imp1]])
-
-            return
-
-    def solve_lasso(self):
+    def solve_lasso_cvxpy(self):
         """ Solves LASSO optimization problem using class attribute alpha as the
         regularization parameter. Stores the selected features, weights, and
-        subforest.
+        subforest. Directly solving via cvxpy.
         """
         if len(self.forest) == 0:
             raise Exception("Build forest.")
@@ -879,7 +883,6 @@ class ControlBurnRegressor:
         y = pd.Series(y)
         y.index = X.index
         tree_list = self.forest
-
         pred = []
         ind = []
 
@@ -889,15 +892,27 @@ class ControlBurnRegressor:
 
         pred = np.transpose(pred)
         ind = np.transpose(ind)
+        w = cp.Variable(len(tree_list),nonneg=True)
+        constraints = []
 
-        ind_vec=np.sum(ind,0)
-        inv_mat = np.linalg.inv(np.diag(ind_vec))
-        transformed_matix=np.matmul(pred,inv_mat)
+        if self.optimization_form == 'penalized':
+            loss = cp.sum_squares(cp.matmul(pred,w)-y)
+            objective = (1/len(y))*loss + alpha*cp.norm(cp.matmul(ind,w),1)
 
-        fit = Lasso(alpha = alpha,fit_intercept= False, positive = True).fit(transformed_matix,y)
-        weights = np.matmul(inv_mat,np.transpose(fit.coef_))
+        if self.optimization_form == 'constrained':
+            objective = cp.sum_squares(cp.matmul(pred,w)-y)
+            constraints = [cp.norm(cp.matmul(ind,w),1)<= alpha]
+
+        prob = cp.Problem(cp.Minimize(objective),constraints)
+
+        if self.solver == 'MOSEK':
+            prob.solve(solver = cp.MOSEK,mosek_params = {mosek.dparam.optimizer_max_time: 10000.0} )
+        else:
+            prob.solve(solver = self.solver)
+
+        weights = np.asarray(w.value)
+        weights[np.abs(weights) < self.threshold] = 0
         self.weights = weights
-
         self.subforest = list(np.array(tree_list)[[w_ind != 0 for w_ind in list(weights)]])
         imp = []
 
@@ -908,8 +923,146 @@ class ControlBurnRegressor:
         self.features_selected_ = list(np.array(X.columns)[[i != 0 for i in imp1]])
         return
 
-        #sklearn-api wrapper functions
-    def fit(self,X,y):
+
+    def solve_lasso(self , costs = [], groups = [], sketching = 1.0):
+        """ Solves LASSO optimization problem using class attribute alpha as the
+        regularization parameter. Stores the selected features, weights, and
+        subforest.
+        """
+        X = self.X
+        if len(self.forest) == 0:
+            raise Exception("Build forest.")
+
+        if len(groups) >0:
+            group_matrix = np.column_stack((np.arange(len(X.columns))
+                                            ,groups,np.ones(len(X.columns))))
+            group_matrix = pd.DataFrame(group_matrix,
+                                        columns = ['feature','group','ind'])
+            group_matrix = group_matrix.pivot_table(index = 'feature', columns = 'group',
+                                values = 'ind').fillna(0).astype(int).values
+            group_matrix = np.transpose(group_matrix)
+
+        alpha = self.alpha
+        if sketching < 1.0:
+            X = self.X
+            y = self.y
+            nsample = int(np.floor(len(y)*sketching))
+            to_sample = X.copy()
+            to_sample['y'] = y
+            to_sample = to_sample.sample(n = nsample)
+            y = to_sample['y']
+            X = to_sample.drop('y',axis = 1)
+            y.index = X.index
+
+        else:
+            X = self.X
+            y = self.y
+            y = pd.Series(y)
+            y.index = X.index
+
+        tree_list = self.forest
+
+        pred = []
+        ind = []
+
+        for tree in tree_list:
+            pred.append(tree.predict(X))
+            if (len(costs) == 0) & (len(groups) == 0):
+                ind.append([int(x > 0) for x in tree.feature_importances_])
+
+            elif (len(costs) != 0) & (len(groups) == 0):
+                cost_matrix = np.diag(costs) #create diagonal cost matrix
+                ind.append(np.dot(cost_matrix,
+                            [int(x > 0) for x in tree.feature_importances_]))
+
+            elif (len(costs) == 0) & (len(groups) != 0):
+                ind.append((np.dot(group_matrix,
+                [int(x > 0) for x in tree.feature_importances_])>0).astype(int))
+
+        pred = np.transpose(pred)
+        ind = np.transpose(ind)
+        ind_vec=np.sum(ind,0)
+        inv_mat = np.linalg.inv(np.diag(ind_vec))
+        transformed_matix=np.matmul(pred,inv_mat)
+
+        fit = Lasso(alpha = alpha,fit_intercept= False, positive = True).fit(transformed_matix,y)
+        weights = np.matmul(inv_mat,np.transpose(fit.coef_))
+        self.weights = weights
+        self.subforest = list(np.array(tree_list)[[w_ind != 0 for w_ind in list(weights)]])
+
+        imp = []
+        for i in range(0,len(weights)):
+            imp.append(weights[i]*tree_list[i].feature_importances_)
+        imp1 = np.sum(imp, axis = 0)
+        self.feature_importances_ = imp1
+        self.features_selected_ = list(np.array(X.columns)[[i != 0 for i in imp1]])
+        return
+
+
+    def solve_l0(self, X, y, K, verbose = False):
+        import gurobipy as gp
+        from gurobipy import GRB
+        from itertools import product
+        """ Selects the best subset of trees in the ensemble such that the
+        total features used is equal to K. Best subset solver implemented using
+        gurobi. Dependencies imported inside package since optional function.
+        """
+        if len(self.forest) == 0:
+            raise Exception("Build forest.")
+
+        tree_list = self.forest
+        self.X = X
+        self.y = y
+
+        M = len(tree_list)*2
+        pred = []
+        ind = []
+
+        for tree in tree_list:
+            pred.append(tree.predict(X))
+            ind.append([int(x > 0) for x in tree.feature_importances_])
+
+        Xpred = np.transpose(pred)
+        ind = np.transpose(ind)
+        response = np.array(y)
+
+        regressor = gp.Model()
+        if verbose == False:
+            regressor.Params.LogToConsole = 0
+        beta = regressor.addVars(len(tree_list), lb=0, name="beta")
+        featurenonzero = regressor.addVars(len(X.columns),
+                            vtype=GRB.BINARY, name="featurenonzero")
+
+        Quad = np.dot(Xpred.T, Xpred)
+        lin = np.dot(response.T, Xpred)
+        obj = sum(0.5 * Quad[i,j] * beta[i] * beta[j] for i, j in product(range(len(tree_list)), repeat=2))
+        obj -= sum(lin[i] * beta[i] for i in range(len(tree_list)))
+        obj += 0.5 * np.dot(response, response)
+
+        regressor.setObjective(obj, GRB.MINIMIZE)
+        for i in range(0,len(X.columns)):
+            regressor.addConstr(gp.quicksum(ind[i][j]*beta[j] for j in range(0,len(tree_list))) <= M*featurenonzero[i])
+        regressor.addConstr(featurenonzero.sum() ==  K)
+
+        regressor.optimize()
+        weights = np.array([beta[i].X for i in range(len(tree_list))])
+        subforest = np.array(tree_list)[weights != 0]
+        features_selected = X.columns[[int(featurenonzero[i].X) == 1 for i in range(len(X.columns))]].values
+
+        imp = []
+        for i in range(0,len(weights)):
+            imp.append(weights[i]*tree_list[i].feature_importances_)
+        imp1 = np.sum(imp, axis = 0)
+
+        self.weights = weights
+        self.subforest = subforest
+        self.feature_importances_= imp1
+        self.features_selected_ = features_selected
+        return
+
+
+
+    def fit(self,X,y,costs = [], groups = [], sketching = 1.0):
         """ Wrapper function, builds a forest and solves LASSO optimization Problem
         to select a subforest. Trains final model on selected features.
         """
@@ -917,11 +1070,11 @@ class ControlBurnRegressor:
             raise Exception("Please scale data before using ControlBurnRegressor.")
 
         self.build_forest_method(X,y)
-        self.solve_lasso()
+        self.solve_lasso(costs, groups ,sketching = sketching)
         if len(self.features_selected_) == 0:
             self.trained_polish = y
         else:
-            self.trained_polish = self.polish_method().fit(X[self.features_selected_],y)
+            self.trained_polish = self.polish_method.fit(X[self.features_selected_],y)
 
     def predict(self,X):
         """ Returns predictions of final model trained on selected features.
@@ -941,11 +1094,22 @@ class ControlBurnRegressor:
         else:
             return X[self.features_selected_]
 
-    def solve_lasso_path(self, X,y , n_alphas = 500, kwargs = {}):
+    def solve_lasso_path(self, X,y ,
+                        n_alphas = 500, costs = [], groups = [], kwargs = {}):
         """ Compute the entire lasso path.
         """
         if len(self.forest) == 0:
             raise Exception("Build forest.")
+
+        if len(groups) >0:
+            group_matrix = np.column_stack((np.arange(len(X.columns))
+                                            ,groups,np.ones(len(X.columns))))
+            group_matrix = pd.DataFrame(group_matrix,
+                                        columns = ['feature','group','ind'])
+            group_matrix = group_matrix.pivot_table(index = 'feature', columns = 'group',
+                                values = 'ind').fillna(0).astype(int).values
+            group_matrix = np.transpose(group_matrix)
+
         alpha = self.alpha
         y = pd.Series(y)
         y.index = X.index
@@ -956,7 +1120,17 @@ class ControlBurnRegressor:
 
         for tree in tree_list:
             pred.append(tree.predict(X))
-            ind.append([int(x > 0) for x in tree.feature_importances_])
+            if (len(costs) == 0) & (len(groups) == 0):
+                ind.append([int(x > 0) for x in tree.feature_importances_])
+
+            elif (len(costs) != 0) & (len(groups) == 0):
+                cost_matrix = np.diag(costs) #create diagonal cost matrix
+                ind.append(np.dot(cost_matrix,
+                            [int(x > 0) for x in tree.feature_importances_]))
+
+            elif (len(costs) == 0) & (len(groups) != 0):
+                ind.append((np.dot(group_matrix,
+                [int(x > 0) for x in tree.feature_importances_])>0).astype(int))
 
         pred = np.transpose(np.array(pred,dtype = object))
         ind = np.transpose(ind)

@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: ControlBurn
-Version: 0.1.1
+Version: 0.1.2
 Summary: Feature Selection by Sparse Forests
 Home-page: https://github.com/brianliu12437/ControlBurnPackage
 Author: Brian Liu
@@ -27,7 +27,7 @@ Tree ensembles distribute feature importance scores evenly amongst groups of cor
 
 The easiest way to install ControlBurn is through pip.
 ```sh
-!pip install ControlBurn==0.1.1
+!pip install ControlBurn==0.1.2
 ```
 
 
